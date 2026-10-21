@@ -21,7 +21,7 @@ export function isSourceUrl(value, sourceId) {
   try {
     const url = new URL(value);
     const source = sources.find((entry) => entry.id === sourceId);
-    return Boolean(source && url.protocol === 'https:' && !url.username && !url.password && source.domains.some((domain) => url.hostname === domain || url.hostname.endsWith(`.${domain}`)));
+    return Boolean(source && url.protocol === 'https:' && !url.username && !url.password && !url.port && source.domains.some((domain) => url.hostname === domain || url.hostname.endsWith(`.${domain}`)));
   } catch { return false; }
 }
 

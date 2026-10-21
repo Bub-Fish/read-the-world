@@ -6,6 +6,8 @@ export interface Article {
   id: string; title: string; titleEn: string; summary: string; category: string; difficulty: string;
   sourceId: string; sourceUrl: string; sourceTitle?: string; origin: 'demo' | 'generated' | 'imported';
   publishedAt: string | null; createdAt: string; wordCount: number; minutes: number;
+  selectionReason?: string; model?: string;
+  sourceMaterial?: { status: 'public-text' | 'rss-only'; reason?: string; wordCount: number; retrievedAt: string; url: string; truncated?: boolean };
   sentences: Sentence[]; vocabulary: Word[]; questions: Question[];
 }
 export interface Settings {
@@ -16,6 +18,8 @@ export interface Job {
   id?: string; date?: string; status: 'running' | 'complete' | 'partial' | 'failed'; total: number;
   completed: number; articleIds: string[]; errors: { title?: string; message: string }[];
   currentTitle?: string; alreadyExists?: boolean;
+  phase?: 'fetching' | 'selecting' | 'reading' | 'generating' | 'finished';
+  warnings?: { title?: string; message: string }[];
 }
 export interface LibraryResponse { articles: Article[]; sources: Source[]; daily: Record<string, string[]>; settings: Settings; today: string; activeJob: Job | null }
 export interface News { id: string; title: string; url: string; sourceId: string; publishedAt: string; description: string }

@@ -11,6 +11,7 @@ interface ReaderProps {
 export function Reader({ article, source, progress, bookmarked, words, onBack, onBookmark, onWord, onProgress, onComplete }: ReaderProps) {
   const [tab, setTab] = useState('read');
   const [bilingual, setBilingual] = useState(true);
+  const [revealedTranslations, setRevealedTranslations] = useState<Set<number>>(() => new Set());
   const [fontSize, setFontSize] = useState(19);
   const [selectedWord, setSelectedWord] = useState<Word | null>(null);
   const [highlightedSentence, setHighlightedSentence] = useState<number | null>(null);
@@ -32,6 +33,14 @@ export function Reader({ article, source, progress, bookmarked, words, onBack, o
     setTab('read'); setHighlightedSentence(index);
     window.setTimeout(() => document.getElementById(`sentence-${index}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 100);
   }
+  function toggleTranslation(index: number) {
+    setRevealedTranslations((previous) => {
+      const next = new Set(previous);
+      if (next.has(index)) next.delete(index);
+      else next.add(index);
+      return next;
+    });
+  }
   return <div className="reader-page">
     <div className="reader-topline"><button className="text-button" onClick={onBack}><ArrowLeft size={17} />返回文章列表</button><span>READ CLOSELY. THINK DEEPLY.</span><button className={`button small ${bookmarked ? 'tinted' : 'secondary'}`} onClick={onBookmark}><Bookmark size={15} fill={bookmarked ? 'currentColor' : 'none'} />{bookmarked ? '已收藏' : '收藏文章'}</button></div>
     <div className="reader-layout"><main className="reader-content">
@@ -39,13 +48,15 @@ export function Reader({ article, source, progress, bookmarked, words, onBack, o
         <div className="article-eyebrow"><span className="category-label">{article.category}</span><span className="source-name"><b style={{ backgroundColor: source.color }}>{source.short}</b>{source.name}</span></div>
         <h1>{article.titleEn}</h1><h2>{article.title}</h2>
         <div className="reading-meta"><span><Clock3 size={14} />约 {article.minutes} 分钟</span><span><FileText size={14} />{article.wordCount} 词</span><span><GraduationCap size={15} />{article.difficulty}</span></div>
-        <div className="origin-note"><Sparkles size={14} /><span>{article.origin === 'demo' ? '原创教学示例 · 媒体名称仅表示选题方向，非该媒体原文' : article.origin === 'generated' ? 'AI 原创学习改写 · 基于下方新闻选题，非媒体原文或原文摘要' : '用户导入正文 · AI 辅助翻译与出题'}</span><a href={article.sourceUrl} target="_blank" rel="noreferrer">{article.origin === 'demo' ? '媒体主页' : '查看来源'}<ExternalLink size={12} /></a></div>
+        <div className="origin-note"><Sparkles size={14} /><span>{article.origin === 'demo' ? '原创教学示例 · 媒体名称仅表示选题方向，非该媒体原文' : article.origin === 'generated' ? article.sourceMaterial?.status === 'public-text' ? 'AI 精读创作 · 已自动读取公开正文作为资料参考，非媒体原文' : 'AI 选题创作 · 仅基于公开标题与简述，未获取原文' : '用户导入正文 · AI 辅助翻译与出题'}</span><a href={article.sourceUrl} target="_blank" rel="noreferrer">{article.origin === 'demo' ? '媒体主页' : '查看来源'}<ExternalLink size={12} /></a></div>
+        {article.selectionReason && <div className="selection-note"><span>为什么读这篇</span><p>{article.selectionReason}</p></div>}
+        {article.sourceMaterial?.status === 'rss-only' && <p className="source-fallback-note">{article.sourceMaterial.reason || '原文暂不可读，本篇为选题创作。'}</p>}
       </header>
       <div className="reader-tabs" role="tablist" aria-label="学习模式">{[{ id: 'read', text: '逐句精读', number: article.sentences.length }, { id: 'words', text: '核心词汇', number: article.vocabulary.length }, { id: 'quiz', text: '阅读训练', number: 3 }].map((item) => <button role="tab" aria-selected={tab === item.id} key={item.id} onClick={() => setTab(item.id)}>{item.text}<span>{item.number}</span></button>)}</div>
       {tab === 'read' && <section aria-label="逐句精读正文">
         <div className="reading-controls"><span><span className="tiny-dot" />点击划线词汇，随时收进生词本</span><div><button className="text-button" onClick={() => setBilingual(!bilingual)}>{bilingual ? <Eye size={15} /> : <EyeOff size={15} />}{bilingual ? '双语对照' : '仅看英文'}</button><div className="font-size-controls"><button aria-label="缩小字号" disabled={fontSize <= 16} onClick={() => setFontSize(fontSize - 1)}><Minus size={13} /></button><span>Aa</span><button aria-label="放大字号" disabled={fontSize >= 24} onClick={() => setFontSize(fontSize + 1)}><Plus size={13} /></button></div></div></div>
         <div className="article-prose" style={{ '--reading-size': `${fontSize}px` } as React.CSSProperties}>
-          {article.sentences.map((sentence, index) => <div id={`sentence-${index + 1}`} key={index} className={`sentence-pair ${index === 0 || sentence.paragraph !== article.sentences[index - 1].paragraph ? 'paragraph-start' : ''} ${highlightedSentence === index + 1 ? 'sentence-located' : ''}`}><span className="sentence-number">{String(index + 1).padStart(2, '0')}</span><p className="english-sentence">{highlight(sentence.en)}</p>{bilingual && <p className="chinese-sentence">{sentence.zh}</p>}</div>)}
+          {article.sentences.map((sentence, index) => <div id={`sentence-${index + 1}`} key={index} className={`sentence-pair ${index === 0 || sentence.paragraph !== article.sentences[index - 1].paragraph ? 'paragraph-start' : ''} ${highlightedSentence === index + 1 ? 'sentence-located' : ''}`}><span className="sentence-number">{String(index + 1).padStart(2, '0')}</span><p className="english-sentence">{highlight(sentence.en)}</p>{bilingual && <button type="button" className={`chinese-sentence translation-toggle ${revealedTranslations.has(index) ? '' : 'is-masked'}`} aria-pressed={revealedTranslations.has(index)} aria-label={`${revealedTranslations.has(index) ? '遮挡' : '显示'}第 ${index + 1} 句中文翻译`} title={revealedTranslations.has(index) ? '点击遮挡翻译' : '点击显示翻译'} onClick={() => toggleTranslation(index)}><span className="translation-text" aria-hidden={!revealedTranslations.has(index)}>{sentence.zh}</span>{!revealedTranslations.has(index) && <span className="translation-hint" aria-hidden="true"><Eye size={13} />点击显示翻译</span>}</button>}</div>)}
         </div>
         <div className="reading-finish"><span className="finish-symbol"><CheckCheckIcon /></span><h3>读完了，理解才刚刚开始。</h3><p>带着刚才的思考，试试 3 道阅读理解题。</p><div><button className="button secondary" onClick={onComplete}><CheckCircle2 size={17} />{progress.completedAt ? '已完成精读' : '标记为已读'}</button><button className="button primary" onClick={() => setTab('quiz')}>开始阅读训练<ArrowRight size={16} /></button></div></div>
       </section>}

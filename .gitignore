@@ -6,3 +6,4 @@ data/
 *.log
 tsconfig.tsbuildinfo
 .qa/
+/releases/readworld-android.zip

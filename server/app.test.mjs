@@ -17,6 +17,9 @@ let mockUrl;
 let mockRequests = [];
 let mockStatus = 200;
 let settings;
+let invalidSelection = false;
+let blockedSource = null;
+let disconnectRequests = 0;
 
 before(async () => {
   temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'readworld-test-'));
@@ -25,8 +28,18 @@ before(async () => {
     for await (const chunk of request) body += chunk;
     const payload = JSON.parse(body);
     mockRequests.push(payload);
+    if (disconnectRequests > 0) { disconnectRequests--; request.socket.destroy(); return; }
     response.writeHead(mockStatus, { 'Content-Type': 'application/json' });
-    response.end(JSON.stringify(mockStatus === 200 ? { choices: [{ finish_reason: 'stop', message: { content: payload.max_tokens === 64 ? 'OK' : JSON.stringify(demos[0]) } }] } : { error: 'SENSITIVE-UPSTREAM-DETAIL' }));
+    let content = payload.max_tokens === 64 ? 'OK' : JSON.stringify(demos[0]);
+    if (payload.messages[0].content.includes('考研英语外刊选文编辑')) {
+      const pool = JSON.parse(payload.messages[1].content);
+      const count = Number(payload.messages[0].content.match(/恰好选择 (\d+) 篇/)[1]);
+      content = JSON.stringify({ selections: pool.slice(0, count).map((article, index) => ({ id: invalidSelection && index === 0 ? 'hallucinated-id' : article.id, reason: '论证清晰，适合考研推断与主旨训练' })) });
+    } else if (payload.max_tokens !== 64 && blockedSource) {
+      const material = JSON.parse(payload.messages[1].content);
+      if (material.source === blockedSource) content = '{"incomplete":true}';
+    }
+    response.end(JSON.stringify(mockStatus === 200 ? { choices: [{ finish_reason: 'stop', message: { content } }] } : { error: 'SENSITIVE-UPSTREAM-DETAIL' }));
   });
   await new Promise((resolve) => mockServer.listen(0, '127.0.0.1', resolve));
   mockUrl = `http://127.0.0.1:${mockServer.address().port}/v1`;
@@ -35,12 +48,14 @@ before(async () => {
   const port = portProbe.address().port;
   await new Promise((resolve) => portProbe.close(resolve));
   baseUrl = `http://127.0.0.1:${port}`;
-  serverProcess = spawn(process.execPath, [fileURLToPath(new URL('./index.mjs', import.meta.url))], { env: { ...process.env, PORT: String(port), READWORLD_DATA_DIR: temporaryDirectory, AI_API_KEY: '' }, stdio: 'ignore' });
+  serverProcess = spawn(process.execPath, ['--import', new URL('./fixtures/publishers.mjs', import.meta.url).href, fileURLToPath(new URL('./index.mjs', import.meta.url))], { env: { ...process.env, PORT: String(port), READWORLD_DATA_DIR: temporaryDirectory, AI_API_KEY: '', NO_PROXY: '*' }, stdio: ['ignore', 'ignore', 'pipe'] });
+  let startupErrors = '';
+  serverProcess.stderr.on('data', (chunk) => { startupErrors = (startupErrors + chunk).slice(-3000); });
   for (let attempt = 0; attempt < 60; attempt++) {
     try { const response = await fetch(`${baseUrl}/api/health`); if (response.ok) return; } catch {}
     await delay(100);
   }
-  throw new Error('Test API failed to start');
+  throw new Error(`Test API failed to start: ${startupErrors}`);
 });
 
 after(async () => {
@@ -54,6 +69,14 @@ after(async () => {
 });
 
 const request = (route, body, method = 'POST') => fetch(`${baseUrl}/api${route}`, { method, headers: { 'Content-Type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}) });
+async function waitForJob(id) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const job = await (await fetch(`${baseUrl}/api/jobs/${id}`)).json();
+    if (job.status !== 'running') return job;
+    await delay(30);
+  }
+  throw new Error('Test generation did not complete');
+}
 
 test('library starts with complete examples, seven sources and no claimed publication date', async () => {
   const response = await fetch(`${baseUrl}/api/library`);
@@ -88,6 +111,15 @@ test('connection test calls the configured compatible endpoint', async () => {
   assert.equal(response.status, 200);
   assert.equal(mockRequests.at(-1).model, 'test-model');
   assert.equal(mockRequests.at(-1).max_tokens, 64);
+});
+
+test('transient connection failures retry without changing provider settings', async () => {
+  disconnectRequests = 1;
+  const callsBefore = mockRequests.length;
+  const response = await request('/test');
+  assert.equal(response.status, 200);
+  assert.equal(mockRequests.length, callsBefore + 2);
+  assert.equal(mockRequests.at(-1).model, 'test-model');
 });
 
 test('import rejects a misleading source domain', async () => {
@@ -126,6 +158,61 @@ test('upstream failures are explained without leaking upstream body', async () =
   assert.match(text, /API Key 无效/);
   assert.equal(text.includes('SENSITIVE-UPSTREAM-DETAIL'), false);
   mockStatus = 200;
+});
+
+test('daily acquisition refuses model-invented articles without saving fabricated results', async () => {
+  invalidSelection = true;
+  const previous = await (await fetch(`${baseUrl}/api/library`)).json();
+  const response = await request('/generate-daily');
+  assert.equal(response.status, 202);
+  const started = await response.json();
+  assert.equal(started.phase, 'fetching');
+  const finished = await waitForJob(started.id);
+  assert.equal(finished.status, 'failed');
+  assert.match(finished.errors[0].message, /无效或重复/);
+  const library = await (await fetch(`${baseUrl}/api/library`)).json();
+  assert.equal(library.articles.length, previous.articles.length);
+  invalidSelection = false;
+});
+
+test('daily pipeline uses the configured model, reads public sources and preserves partial successes', async () => {
+  blockedSource = 'guardian';
+  const response = await request('/generate-daily');
+  const started = await response.json();
+  const duplicate = await (await request('/generate-daily')).json();
+  assert.equal(duplicate.id, started.id);
+  const finished = await waitForJob(started.id);
+  assert.equal(finished.status, 'partial');
+  assert.equal(finished.articleIds.length, 2);
+  const library = await (await fetch(`${baseUrl}/api/library`)).json();
+  assert.equal(library.daily[library.today].length, 2);
+  for (const id of finished.articleIds) {
+    const article = library.articles.find((entry) => entry.id === id);
+    assert.equal(article.sourceMaterial.status, 'public-text');
+    assert.equal(article.sourceMaterial.wordCount, demos[0].wordCount);
+    assert.equal('text' in article.sourceMaterial, false);
+    assert.ok(article.selectionReason);
+    assert.equal(article.model, 'test-model');
+  }
+  assert.ok(mockRequests.some((payload) => payload.max_tokens === 1800));
+  assert.ok(mockRequests.some((payload) => payload.max_tokens !== 64 && payload.messages[1].content.includes('publicSourceText')));
+  blockedSource = null;
+});
+
+test('retry only fills missing daily slots and completed days do not spend more tokens', async () => {
+  const started = await (await request('/generate-daily')).json();
+  assert.equal(started.total, 1);
+  const finished = await waitForJob(started.id);
+  assert.equal(finished.status, 'complete');
+  assert.equal(finished.articleIds.length, 1);
+  const library = await (await fetch(`${baseUrl}/api/library`)).json();
+  assert.equal(library.daily[library.today].length, 3);
+  assert.equal(new Set(library.daily[library.today].map((id) => library.articles.find((article) => article.id === id).sourceUrl)).size, 3);
+  const callsBefore = mockRequests.length;
+  const repeated = await (await request('/generate-daily')).json();
+  assert.equal(repeated.alreadyExists, true);
+  assert.equal(repeated.articleIds.length, 3);
+  assert.equal(mockRequests.length, callsBefore);
 });
 
 test('settings support intentional key deletion', async () => {
